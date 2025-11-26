@@ -1,0 +1,16 @@
+{
+  "confusion_matrix": [
+    [
+      25101,
+      1399
+    ],
+    [
+      56,
+      1787
+    ]
+  ],
+  "labels": [
+    "SLA_Met",
+    "SLA_Breach"
+  ]
+}

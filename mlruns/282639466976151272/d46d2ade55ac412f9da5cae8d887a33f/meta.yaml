@@ -1,0 +1,15 @@
+artifact_uri: file:///D:/Zaman%20Data/Assignment-CICD/Topic2/Task2/mlruns/282639466976151272/d46d2ade55ac412f9da5cae8d887a33f/artifacts
+end_time: 1764066264572
+entry_point_name: ''
+experiment_id: '282639466976151272'
+lifecycle_stage: active
+run_id: d46d2ade55ac412f9da5cae8d887a33f
+run_name: Iteration_1_Baseline_RandomForest
+run_uuid: d46d2ade55ac412f9da5cae8d887a33f
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1764066259471
+status: 3
+tags: []
+user_id: zaman.ali

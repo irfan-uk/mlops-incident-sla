@@ -1,0 +1,15 @@
+artifact_uri: file:///D:/Zaman%20Data/Assignment-CICD/Topic2/Task2/mlruns/282639466976151272/b8473e8a66c64d40bf03f76d6bac0651/artifacts
+end_time: 1764066283130
+entry_point_name: ''
+experiment_id: '282639466976151272'
+lifecycle_stage: active
+run_id: b8473e8a66c64d40bf03f76d6bac0651
+run_name: Iteration_2_Optimized_XGBoost
+run_uuid: b8473e8a66c64d40bf03f76d6bac0651
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1764066264579
+status: 3
+tags: []
+user_id: zaman.ali
