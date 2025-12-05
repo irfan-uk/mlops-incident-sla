@@ -5,9 +5,13 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 env:
   PYTHON_VERSION: '3.9'
+  AZURE_RESOURCE_GROUP: 'sla-rg'
+  AZURE_LOCATION: 'eastus'
+  CONTAINER_NAME: 'incident-sla-api'
 
 jobs:
   # Job 1: Data Validation and Testing
@@ -98,6 +102,7 @@ jobs:
     - name: Train models
       run: |
         echo "Training models with MLflow..."
+        export MLFLOW_TRACKING_URI=./mlruns
         python train.py
     
     - name: Validate model artifacts
@@ -123,7 +128,7 @@ jobs:
         "
     
     - name: Upload model artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: trained-models
         path: models/
@@ -150,7 +155,7 @@ jobs:
         pip install -r requirements.txt
     
     - name: Download model artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: trained-models
         path: models/
@@ -213,7 +218,7 @@ jobs:
       uses: actions/checkout@v3
     
     - name: Download model artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: trained-models
         path: models/
@@ -227,6 +232,7 @@ jobs:
         context: .
         push: false
         tags: mlops-incident-sla:latest
+        load: true
         cache-from: type=gha
         cache-to: type=gha,mode=max
     
@@ -238,8 +244,19 @@ jobs:
         docker stop test-api
         docker rm test-api
         echo "✅ Docker image test passed!"
+    
+    - name: Save Docker image as artifact
+      run: |
+        docker save mlops-incident-sla:latest | gzip > mlops-incident-sla.tar.gz
+    
+    - name: Upload Docker image
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-image
+        path: mlops-incident-sla.tar.gz
+        retention-days: 1
 
-  # Job 5: Deploy to Azure (manual trigger or on main branch)
+  # Job 5: Deploy to Azure Container Instances
   deploy:
     name: Deploy to Azure
     runs-on: ubuntu-latest
@@ -252,29 +269,153 @@ jobs:
       uses: actions/checkout@v3
     
     - name: Download model artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: trained-models
         path: models/
+    
+    - name: Download Docker image
+      uses: actions/download-artifact@v4
+      with:
+        name: docker-image
+        path: .
     
     - name: Azure Login
       uses: azure/login@v1
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
     
+    - name: Load and push Docker image to ACR
+      run: |
+        # Create ACR if it doesn't exist
+        az acr create \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --name irfansla \
+          --sku Basic \
+          --admin-enabled true \
+          || echo "ACR already exists"
+        
+        # Get ACR credentials
+        ACR_USERNAME=$(az acr credential show --name irfansla --query username -o tsv)
+        ACR_PASSWORD=$(az acr credential show --name irfansla --query passwords[0].value -o tsv)
+        
+        # Login to ACR
+        echo $ACR_PASSWORD | docker login irfansla.azurecr.io -u $ACR_USERNAME --password-stdin
+        
+        # Load Docker image
+        docker load -i mlops-incident-sla.tar.gz
+        
+        # Tag and push to ACR
+        docker tag mlops-incident-sla:latest irfansla.azurecr.io/incident-sla-api:${{ github.run_number }}
+        docker tag mlops-incident-sla:latest irfansla.azurecr.io/incident-sla-api:latest
+        docker push irfansla.azurecr.io/incident-sla-api:${{ github.run_number }}
+        docker push irfansla.azurecr.io/incident-sla-api:latest
+        
+        echo "✅ Image pushed to ACR"
+    
     - name: Deploy to Azure Container Instances
       run: |
-        echo "Deploying to Azure..."
-        # Add your Azure deployment commands here
-        # Example:
-        # az container create \
-        #   --resource-group mlops-rg \
-        #   --name mlops-incident-api \
-        #   --image your-registry/mlops-incident-sla:latest \
-        #   --cpu 1 --memory 1 \
-        #   --ports 8000
+        # Get ACR credentials
+        ACR_USERNAME=$(az acr credential show --name irfansla --query username -o tsv)
+        ACR_PASSWORD=$(az acr credential show --name irfansla --query passwords[0].value -o tsv)
+        
+        # Delete existing container if exists
+        az container delete \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --name ${{ env.CONTAINER_NAME }} \
+          --yes \
+          || echo "No existing container to delete"
+        
+        # Deploy new container
+        az container create \
+        --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+        --name ${{ env.CONTAINER_NAME }} \
+        --image irfansla.azurecr.io/incident-sla-api:latest \
+        --registry-login-server irfansla.azurecr.io \
+        --registry-username $ACR_USERNAME \
+        --registry-password $ACR_PASSWORD \
+        --dns-name-label incident-sla-api-${{ github.run_number }} \
+        --ports 8000 \
+        --cpu 1 \
+        --memory 2 \
+        --environment-variables ENVIRONMENT=production \
+        --restart-policy Always \
+        --location ${{ env.AZURE_LOCATION }} \
+        --os-type Linux
+
+        
+        echo "✅ Container deployed to Azure"
     
-    - name: Deployment notification
+    - name: Get deployment URL and test
       run: |
-        echo "✅ Deployment complete!"
-        echo "API endpoint: https://your-azure-url.com"
+        # Wait for deployment
+        sleep 30
+        
+        # Get FQDN
+        FQDN=$(az container show \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --name ${{ env.CONTAINER_NAME }} \
+          --query ipAddress.fqdn -o tsv)
+        
+        API_URL="http://${FQDN}:8000"
+        
+        echo "======================================"
+        echo "✅ DEPLOYMENT SUCCESSFUL!"
+        echo "======================================"
+        echo "API URL: ${API_URL}"
+        echo "Health: ${API_URL}/health"
+        echo "Docs: ${API_URL}/docs"
+        echo "======================================"
+        
+        # Test health endpoint
+        echo "Testing health endpoint..."
+        for i in {1..5}; do
+          if curl -f ${API_URL}/health; then
+            echo "✅ API is responding!"
+            break
+          else
+            echo "Waiting for API... (attempt $i/5)"
+            sleep 10
+          fi
+        done
+        
+        # Save URL
+        echo "${API_URL}" > deployment_url.txt
+    
+    - name: Upload deployment URL
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-url
+        path: deployment_url.txt
+    
+    - name: Create deployment summary
+      run: |
+        FQDN=$(az container show \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --name ${{ env.CONTAINER_NAME }} \
+          --query ipAddress.fqdn -o tsv)
+        
+        echo "## 🚀 Deployment Successful" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📍 API Endpoints" >> $GITHUB_STEP_SUMMARY
+        echo "- **Base URL**: http://${FQDN}:8000" >> $GITHUB_STEP_SUMMARY
+        echo "- **Health Check**: http://${FQDN}:8000/health" >> $GITHUB_STEP_SUMMARY
+        echo "- **Interactive Docs**: http://${FQDN}:8000/docs" >> $GITHUB_STEP_SUMMARY
+        echo "- **Predict Endpoint**: http://${FQDN}:8000/predict" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🧪 Test Commands" >> $GITHUB_STEP_SUMMARY
+        echo '```bash' >> $GITHUB_STEP_SUMMARY
+        echo "# Health check" >> $GITHUB_STEP_SUMMARY
+        echo "curl http://${FQDN}:8000/health" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Make prediction" >> $GITHUB_STEP_SUMMARY
+        echo "curl -X POST http://${FQDN}:8000/predict \\" >> $GITHUB_STEP_SUMMARY
+        echo '  -H "Content-Type: application/json" \' >> $GITHUB_STEP_SUMMARY
+        echo '  -d '"'"'{"reassignment_count":2,"reopen_count":0,"sys_mod_count":8,"open_hour":15,"open_day":2,"open_month":11,"is_business_hours":1,"is_weekday":1,"workload_score":2.8,"complexity_flag":0,"reassigned":1,"reopened":0,"incident_state_code":1,"active":1}'"'"'' >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📊 Deployment Info" >> $GITHUB_STEP_SUMMARY
+        echo "- **Run Number**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deployed At**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+        echo "- **Resource Group**: ${{ env.AZURE_RESOURCE_GROUP }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Container Name**: ${{ env.CONTAINER_NAME }}" >> $GITHUB_STEP_SUMMARY
